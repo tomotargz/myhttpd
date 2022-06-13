@@ -12,7 +12,7 @@ int main(int argc, char* argv[]) {
   int i;
   if (argc < 2) {
     do_cat(STDIN_FILENO, "stdin");
-    exit(1);
+    exit(0);
   }
   for (i = 1; i < argc; i++) {
     int fd = open(argv[i], O_RDONLY);
