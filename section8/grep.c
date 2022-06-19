@@ -3,7 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-static void do_grep(regex_t* p, FILE* f);
+static void do_grep(regex_t* p, FILE* f, int invert_match);
 
 int main(int argc, char* argv[]) {
   if (argc < 2) {
@@ -12,6 +12,7 @@ int main(int argc, char* argv[]) {
   }
 
   int ignore_case = 0;
+  int invert_match = 0;
   int opt;
   while ((opt = getopt(argc, argv, "iv")) != -1) {
     switch (opt) {
@@ -19,6 +20,7 @@ int main(int argc, char* argv[]) {
         ignore_case = 1;
         break;
       case 'v':
+        invert_match = 1;
         break;
       case '?':
         fprintf(stderr, "Usage: %s [-iv] PATTERN [FILE...]\n", argv[0]);
@@ -39,7 +41,7 @@ int main(int argc, char* argv[]) {
   ++optind;
 
   if (optind == argc) {
-    do_grep(&p, stdin);
+    do_grep(&p, stdin, invert_match);
   } else {
     for (int i = optind; i < argc; ++i) {
       FILE* f = fopen(argv[i], "r");
@@ -47,7 +49,7 @@ int main(int argc, char* argv[]) {
         perror(argv[i]);
         exit(1);
       }
-      do_grep(&p, f);
+      do_grep(&p, f, invert_match);
       fclose(f);
     }
   }
@@ -55,10 +57,11 @@ int main(int argc, char* argv[]) {
   exit(0);
 }
 
-static void do_grep(regex_t* p, FILE* f) {
+static void do_grep(regex_t* p, FILE* f, int invert_match) {
   char b[4096];
   while (fgets(b, sizeof b, f)) {
-    if (regexec(p, b, 0, NULL, 0) == 0) {
+    int match = (regexec(p, b, 0, NULL, 0) == 0);
+    if ((match && !invert_match) || (!match && invert_match)) {
       fputs(b, stdout);
     }
   }
