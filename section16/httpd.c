@@ -6,11 +6,27 @@
 #include <stdlib.h>
 #include <string.h>
 
+struct HTTPHeaderField {
+  char* name;
+  char* value;
+  struct HTTPHeaderField* next;
+};
+
+struct HTTPRequest {
+  int protocol_minor_version;
+  char* method;
+  char* path;
+  struct HTTPHeaderField* header;
+  char* body;
+  long length;
+};
+
 static void log_exit(char* fmt, ...);
 static void* xmalloc(size_t s);
 static void install_signal_handlers(void);
 static void trap_signal(int sig, sighandler_t handler);
 static void signal_exit(int sig);
+static void free_request(struct HTTPRequest* req);
 
 static void log_exit(char* fmt, ...) {
   va_list ap;
@@ -43,4 +59,17 @@ static void trap_signal(int sig, sighandler_t handler) {
 
 static void signal_exit(int sig) {
   log_exit("exit by signal %d", sig);
+}
+
+static void free_request(struct HTTPRequest* req) {
+  for (struct HTTPHeaderField* h; h;) {
+    struct HTTPHeaderField* next = h->next;
+    free(h->name);
+    free(h->value);
+    free(h);
+    h = next;
+  }
+  free(req->method);
+  free(req->path);
+  free(req->body);
 }
