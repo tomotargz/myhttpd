@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 struct HTTPHeaderField {
   char* name;
@@ -21,6 +22,12 @@ struct HTTPRequest {
   long length;
 };
 
+struct FileInfo {
+  char* path;
+  long size;
+  int ok;
+};
+
 static void log_exit(char* fmt, ...);
 static void* xmalloc(size_t s);
 static void install_signal_handlers(void);
@@ -33,6 +40,9 @@ static void read_request_line(struct HTTPRequest* req, FILE* in);
 static struct HTTPHeaderField* read_header_field(FILE* in);
 static long content_length(struct HTTPRequest* req);
 static char* lookup_header_field_value(struct HTTPRequest* req, char* name);
+static struct FileInfo* get_fileinfo(char* docroot, char* urlpath);
+static void free_fileinfo(struct FileInfo* f);
+static char* build_fspath(char* docroot, char* urlpath);
 static void upcase(char* str);
 
 int main(int argc, char* argv[]) {
@@ -192,4 +202,27 @@ static char* lookup_header_field_value(struct HTTPRequest* req, char* name) {
     if (!strcasecmp(h->name, name)) return h->value;
   }
   return NULL;
+}
+
+static struct FileInfo* get_fileinfo(char* docroot, char* urlpath) {
+  struct FileInfo* info = xmalloc(sizeof(struct FileInfo));
+  info->path = build_fspath(docroot, urlpath);
+  info->ok = 0;
+  struct stat st;
+  if (lstat(info->path, &st) < 0) return info;
+  if (!S_ISREG(st.st_mode)) return info;
+  info->ok = 1;
+  info->size = st.st_size;
+  return info;
+}
+
+static void free_fileinfo(struct FileInfo* f) {
+  free(f->path);
+  free(f);
+}
+
+static char* build_fspath(char* docroot, char* urlpath) {
+  char* path = xmalloc(strlen(docroot) + strlen(urlpath) + 2);
+  sprintf(path, "%s/%s", docroot, urlpath);
+  return path;
 }
