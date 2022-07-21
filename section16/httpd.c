@@ -26,7 +26,24 @@ static void* xmalloc(size_t s);
 static void install_signal_handlers(void);
 static void trap_signal(int sig, sighandler_t handler);
 static void signal_exit(int sig);
+static void service(FILE* in, FILE* out, char* docroot);
 static void free_request(struct HTTPRequest* req);
+static struct HTTPRequest* read_request(FILE* in);
+static void read_request_line(struct HTTPRequest* req, FILE* in);
+static struct HTTPHeaderField* read_header_field(FILE* in);
+static long content_length(struct HTTPRequest* req);
+static char* lookup_header_field_value(struct HTTPRequest* req, char* name);
+static void upcase(char* str);
+
+int main(int argc, char* argv[]) {
+  if (argc != 2) {
+    fprintf(stderr, "Usage: %s DOC_ROOT\n", argv[0]);
+    exit(1);
+  }
+  install_signal_handlers();
+  service(stdin, stdout, argv[1]);
+  exit(0);
+}
 
 static void log_exit(char* fmt, ...) {
   va_list ap;
@@ -61,6 +78,12 @@ static void signal_exit(int sig) {
   log_exit("exit by signal %d", sig);
 }
 
+static void service(FILE* in, FILE* out, char* docroot) {
+  struct HTTPRequest* req = read_request(in);
+  // respond_to(req, out, docroot);
+  free_request(req);
+}
+
 static void free_request(struct HTTPRequest* req) {
   for (struct HTTPHeaderField* h; h;) {
     struct HTTPHeaderField* next = h->next;
@@ -72,4 +95,101 @@ static void free_request(struct HTTPRequest* req) {
   free(req->method);
   free(req->path);
   free(req->body);
+}
+
+static const int MAX_REQUEST_BODY_LENGTH = 1024;
+
+static struct HTTPRequest* read_request(FILE* in) {
+  struct HTTPRequest* req = xmalloc(sizeof(struct HTTPRequest));
+  read_request_line(req, in);
+  req->header = NULL;
+  struct HTTPHeaderField* h;
+  while ((h = read_header_field(in))) {
+    h->next = req->header;
+    req->header = h;
+  }
+  req->length = content_length(req);
+  if (req->length == 0) {
+    req->body = NULL;
+    return req;
+  }
+
+  if (req->length > MAX_REQUEST_BODY_LENGTH) {
+    log_exit("request body too long");
+  }
+  req->body = xmalloc(req->length);
+  if (fread(req->body, req->length, 1, in) < 1) {
+    log_exit("failed to read request body");
+  }
+  return req;
+}
+
+static const size_t LINE_BUF_SIZE = 1024;
+
+static void read_request_line(struct HTTPRequest* req, FILE* in) {
+  char buf[LINE_BUF_SIZE];
+  if (!fgets(buf, sizeof buf, in)) {
+    log_exit("no request line");
+  }
+  char* p = strchr(buf, ' ');
+  if (!p) log_exit("parse error on request line (1): %s", buf);
+  *p++ = '\0';
+  req->method = xmalloc(p - buf);
+  strcpy(req->method, buf);
+  upcase(req->method);
+  char* path = p;
+  p = strchr(path, ' ');
+  if (!p) log_exit("parse error on request line (2): %s", buf);
+  *p++ = '\0';
+  req->path = xmalloc(p - path);
+  strcpy(req->path, path);
+  if (strncasecmp(p, "HTTP/1.", strlen("HTTP/1."))) {
+    log_exit("parse error on request line (3): %s", buf);
+  }
+  p += strlen("HTTP/1.");
+  req->protocol_minor_version = atoi(p);
+}
+
+static void upcase(char* str) {
+  char* c = str;
+  while (*c) {
+    if ('a' <= *c && *c <= 'z') {
+      *c += 'A' - 'a';
+    }
+    ++c;
+  }
+}
+
+static struct HTTPHeaderField* read_header_field(FILE* in) {
+  char buf[LINE_BUF_SIZE];
+  if (!fgets(buf, LINE_BUF_SIZE, in)) {
+    log_exit("failed to read request header field: %s", strerror(errno));
+  }
+  if (buf[0] == '\n' || !strcmp(buf, "\r\n")) return NULL;
+  char* p = strchr(buf, ':');
+  if (!p) log_exit("parse error on request header field: %s", buf);
+  *p++ = '\0';
+  struct HTTPHeaderField* h = xmalloc(sizeof(struct HTTPHeaderField));
+  h->name = xmalloc(p - buf);
+  strcpy(h->name, buf);
+
+  p += strspn(p, " \t");
+  h->value = xmalloc(strlen(p) + 1);
+  strcpy(h->value, p);
+  return h;
+}
+
+static long content_length(struct HTTPRequest* req) {
+  char* val = lookup_header_field_value(req, "Content-Length");
+  if (!val) return 0;
+  long len = atol(val);
+  if (len < 0) log_exit("negative Content-length value");
+  return len;
+}
+
+static char* lookup_header_field_value(struct HTTPRequest* req, char* name) {
+  for (struct HTTPHeaderField* h = req->header; h; h = h->next) {
+    if (!strcasecmp(h->name, name)) return h->value;
+  }
+  return NULL;
 }
