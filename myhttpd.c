@@ -111,6 +111,7 @@ int main(int argc, char* argv[]) {
         break;
       case 'h':
         fprintf(stdout, USAGE, argv[0]);
+        exit(0);
       case '?':
         fprintf(stderr, USAGE, argv[0]);
         exit(1);
