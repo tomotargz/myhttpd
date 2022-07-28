@@ -124,7 +124,7 @@ int main(int argc, char* argv[]) {
   docroot = argv[optind];
   if (do_chroot) {
     setup_environment(docroot, user, group);
-    docroot = NULL;
+    docroot = "";
   }
   install_signal_handlers();
   int server_fd = listen_socket(port);
