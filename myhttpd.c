@@ -93,7 +93,7 @@ static const char* SERVER_NAME = "myHTTP";
 
 int main(int argc, char* argv[]) {
   int opt;
-  while ((opt = getopt_long(argc, argv, "", longopts, NULL)) != -1) {
+  while ((opt = getopt_long(argc, argv, "h", longopts, NULL)) != -1) {
     switch (opt) {
       case 0:
         break;
