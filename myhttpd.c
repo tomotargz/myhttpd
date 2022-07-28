@@ -1,12 +1,19 @@
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
+#include <getopt.h>
+#include <grp.h>
+#include <netdb.h>
+#include <pwd.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/types.h>
+#include <syslog.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -31,10 +38,12 @@ struct FileInfo {
   int ok;
 };
 
-static void log_exit(char* fmt, ...);
+static void log_exit(const char* fmt, ...);
 static void* xmalloc(size_t s);
 static void install_signal_handlers(void);
 static void trap_signal(int sig, sighandler_t handler);
+static void detach_children(void);
+static void noop_handler(int sig);
 static void signal_exit(int sig);
 static void service(FILE* in, FILE* out, char* docroot);
 static void free_request(struct HTTPRequest* req);
@@ -55,22 +64,86 @@ static void output_common_header_fields(struct HTTPRequest* req, FILE* out,
                                         char* status);
 static char* guess_content_type(struct FileInfo* f);
 static void upcase(char* str);
+static int listen_socket(char* path);
+static void server_main(int server_fd, char* doc_root);
+static void become_daemon(void);
+static void setup_environment(char* root, char* user, char* group);
+
+static const char* USAGE =
+    "Usage: %s [--port=n] [--chroot --user=u --group=g] <docroot>\n";
+
+static int debug_mode = 0;
+static int do_chroot = 0;
+static char* user = NULL;
+static char* group = NULL;
+static char* port = NULL;
+static char* docroot = NULL;
+
+static struct option longopts[] = {
+    {"debug", no_argument, &debug_mode, 1},
+    {"chroot", no_argument, NULL, 'c'},
+    {"user", required_argument, NULL, 'u'},
+    {"group", required_argument, NULL, 'g'},
+    {"port", required_argument, NULL, 'p'},
+    {"help", no_argument, NULL, 'h'},
+    {0, 0, 0, 0},
+};
+
+static const char* SERVER_NAME = "myHTTP";
 
 int main(int argc, char* argv[]) {
-  if (argc != 2) {
-    fprintf(stderr, "Usage: %s DOC_ROOT\n", argv[0]);
+  int opt;
+  while ((opt = getopt_long(argc, argv, "", longopts, NULL)) != -1) {
+    switch (opt) {
+      case 0:
+        break;
+      case 'c':
+        do_chroot = 1;
+        break;
+      case 'u':
+        user = optarg;
+        break;
+      case 'g':
+        group = optarg;
+        break;
+      case 'p':
+        port = optarg;
+        break;
+      case 'h':
+        fprintf(stdout, USAGE, argv[0]);
+      case '?':
+        fprintf(stderr, USAGE, argv[0]);
+        exit(1);
+    }
+  }
+  if (optind != argc - 1) {
+    fprintf(stderr, USAGE, argv[0]);
     exit(1);
   }
+  docroot = argv[optind];
+  if (do_chroot) {
+    setup_environment(docroot, user, group);
+    docroot = NULL;
+  }
   install_signal_handlers();
-  service(stdin, stdout, argv[1]);
+  int server_fd = listen_socket(port);
+  if (!debug_mode) {
+    openlog(SERVER_NAME, LOG_PID | LOG_NDELAY, LOG_DAEMON);
+    become_daemon();
+  }
+  server_main(server_fd, docroot);
   exit(0);
 }
 
-static void log_exit(char* fmt, ...) {
+static void log_exit(const char* fmt, ...) {
   va_list ap;
   va_start(ap, fmt);
-  vfprintf(stderr, fmt, ap);
-  fputc('\n', stderr);
+  if (debug_mode) {
+    vfprintf(stderr, fmt, ap);
+    fputc('\n', stderr);
+  } else {
+    vsyslog(LOG_ERR, fmt, ap);
+  }
   va_end(ap);
   exit(1);
 }
@@ -83,6 +156,7 @@ static void* xmalloc(size_t s) {
 
 static void install_signal_handlers(void) {
   trap_signal(SIGPIPE, signal_exit);
+  detach_children();
 }
 
 static void trap_signal(int sig, sighandler_t handler) {
@@ -93,6 +167,20 @@ static void trap_signal(int sig, sighandler_t handler) {
   if (sigaction(sig, &act, NULL) < 0) {
     log_exit("sigaction() failed: %s", strerror(errno));
   }
+}
+
+static void detach_children(void) {
+  struct sigaction act;
+  act.sa_handler = noop_handler;
+  sigemptyset(&act.sa_mask);
+  act.sa_flags = SA_RESTART | SA_NOCLDWAIT;
+  if (sigaction(SIGCHLD, &act, NULL) < 0) {
+    log_exit("sigaction() failed: %s", strerror(errno));
+  }
+}
+
+static void noop_handler(int sig) {
+  ;
 }
 
 static void signal_exit(int sig) {
@@ -296,7 +384,6 @@ static void not_found(struct HTTPRequest* req, FILE* out) {
 
 static const size_t TIME_BUF_SIZE = 1024;
 static const int HTTP_MINOR_VERSION = 0;
-static const char* SERVER_NAME = "myHTTP";
 static const char* SERVER_VERSION = "1.0";
 
 static void output_common_header_fields(struct HTTPRequest* req, FILE* out,
@@ -314,4 +401,95 @@ static void output_common_header_fields(struct HTTPRequest* req, FILE* out,
 
 static char* guess_content_type(struct FileInfo* f) {
   return "text/plain";
+}
+
+static const int MAX_BACKLOG = 5;
+
+static int listen_socket(char* path) {
+  struct addrinfo hints;
+  memset(&hints, 0, sizeof hints);
+  hints.ai_family = AF_INET;
+  hints.ai_socktype = SOCK_STREAM;
+  hints.ai_flags = AI_PASSIVE;
+  struct addrinfo* res;
+  int err = getaddrinfo(NULL, port, &hints, &res);
+  if (err) log_exit(gai_strerror(err));
+  for (struct addrinfo* ai = res; ai; ai = ai->ai_next) {
+    int sock = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+    if (sock < 0) continue;
+    if (bind(sock, ai->ai_addr, ai->ai_addrlen) < 0) {
+      close(sock);
+      continue;
+    }
+    if (listen(sock, MAX_BACKLOG) < 0) {
+      close(sock);
+      continue;
+    }
+    freeaddrinfo(res);
+    return sock;
+  }
+  log_exit("failed to listen socket");
+  return -1;
+}
+
+static void server_main(int server_fd, char* doc_root) {
+  for (;;) {
+    struct sockaddr_storage addr;
+    socklen_t addrlen = sizeof addr;
+    int sock = accept(server_fd, (struct sockaddr*)&addr, &addrlen);
+    if (sock < 0) log_exit("accept(2) failed: %s", strerror(errno));
+    int pid = fork();
+    if (pid < 0) exit(3);
+    if (pid == 0) {
+      FILE* in = fdopen(sock, "r");
+      FILE* out = fdopen(sock, "w");
+      service(in, out, docroot);
+      exit(0);
+    }
+    close(sock);
+  }
+}
+
+static void become_daemon(void) {
+  if (chdir("/") < 0) log_exit("chdir(2) failed: %s", strerror(errno));
+  freopen("/dev/null", "r", stdin);
+  freopen("/dev/null", "w", stdout);
+  freopen("/dev/null", "w", stderr);
+  int pid = fork();
+  if (pid < 0) log_exit("fork(2) failed: %s", strerror(errno));
+  if (pid != 0) _exit(0);
+  if (setsid() < 0) log_exit("setsid(2) failed: %s", strerror(errno));
+}
+
+static void setup_environment(char* root, char* user, char* group) {
+  if (!user) {
+    fprintf(stderr, "user not specified\n");
+    exit(1);
+  }
+  if (!group) {
+    fprintf(stderr, "group not specidied\n");
+    exit(1);
+  }
+  struct group* g = getgrnam(group);
+  if (!g) {
+    fprintf(stderr, "no such group: %s\n", group);
+  }
+  if (setgid(g->gr_gid) < 0) {
+    perror("setgid(2)");
+    exit(1);
+  }
+  if (initgroups(user, g->gr_gid) < 0) {
+    perror("initgroups(2)");
+    exit(1);
+  }
+  struct passwd* pw = getpwnam(user);
+  if (!pw) {
+    fprintf(stderr, "no such user: %s\n", user);
+    exit(1);
+  }
+  chroot(root);
+  if (setuid(pw->pw_uid) < 0) {
+    perror("setuid(2)");
+    exit(1);
+  }
 }
